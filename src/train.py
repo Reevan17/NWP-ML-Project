@@ -19,8 +19,8 @@ except ImportError:
     from src.model import WeatherUNet
 
 BATCH_SIZE = 16
-LEARNING_RATE = 2e-3
-EPOCHS = 60
+LEARNING_RATE = 2.5e-3
+EPOCHS = 90
 
 if torch.backends.mps.is_available():
     DEVICE = torch.device("mps")
@@ -30,7 +30,6 @@ else:
     DEVICE = torch.device("cpu")
 
 class SpatialGradientLoss(nn.Module):
-    """Computes Sobel gradient edge loss to enforce sharp physical isotherms"""
     def __init__(self):
         super(SpatialGradientLoss, self).__init__()
         sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).unsqueeze(0).unsqueeze(0)
@@ -46,7 +45,6 @@ class SpatialGradientLoss(nn.Module):
         return torch.mean(torch.abs(grad_pred_x - grad_tgt_x) + torch.abs(grad_pred_y - grad_tgt_y))
 
 class CombinedWeatherLoss(nn.Module):
-    """Combines MSE + L1 (MAE) + Spatial Gradient loss"""
     def __init__(self):
         super(CombinedWeatherLoss, self).__init__()
         self.mse = nn.MSELoss()
@@ -54,7 +52,7 @@ class CombinedWeatherLoss(nn.Module):
         self.grad_loss = SpatialGradientLoss()
 
     def forward(self, pred, target):
-        return self.mse(pred, target) + 0.5 * self.l1(pred, target) + 0.1 * self.grad_loss(pred, target)
+        return self.mse(pred, target) + 1.0 * self.l1(pred, target) + 0.2 * self.grad_loss(pred, target)
 
 def load_data():
     print(f"Loading datasets on {DEVICE}...")
@@ -93,8 +91,12 @@ def train():
     model = WeatherUNet(in_channels=5, out_channels=1).to(DEVICE)
     
     criterion = CombinedWeatherLoss().to(DEVICE)
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-5)
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
+    
+    total_steps = EPOCHS * len(train_loader)
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=LEARNING_RATE, total_steps=total_steps, pct_start=0.15, anneal_strategy='cos'
+    )
 
     print(f"\n{'Epoch':^7} | {'Train Loss':^18} | {'Val Loss':^16} | {'Val RMSE (°C)':^15}")
     print("-" * 65)
@@ -112,6 +114,7 @@ def train():
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()
             train_loss += loss.item() * inputs.size(0)
 
         train_loss /= len(train_loader.dataset)
@@ -129,7 +132,6 @@ def train():
 
         val_loss /= len(val_loader.dataset)
         val_mse  /= len(val_loader.dataset)
-        scheduler.step()
 
         val_rmse_celsius = np.sqrt(val_mse) * float(np.mean(std_Y))
 
@@ -140,7 +142,7 @@ def train():
             best_val_loss = val_loss
             torch.save(model.state_dict(), MODEL_SAVE_PATH)
 
-    print(f"\n✅ Training Finished! Best model saved to '{MODEL_SAVE_PATH}'.")
+    print(f"\n✅ High-Accuracy Training Finished! Best model saved to '{MODEL_SAVE_PATH}'.")
 
 if __name__ == "__main__":
     train()

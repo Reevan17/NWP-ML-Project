@@ -1,79 +1,117 @@
 import torch
 import torch.nn as nn
 
-class SqueezeExcitation(nn.Module):
-    """Channel Attention Mechanism: Dynamically weights feature channels"""
+class ChannelAttention(nn.Module):
     def __init__(self, channels, reduction=8):
-        super(SqueezeExcitation, self).__init__()
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
         self.fc = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
             nn.Linear(channels, channels // reduction, bias=False),
             nn.ReLU(inplace=True),
-            nn.Linear(channels // reduction, channels, bias=False),
-            nn.Sigmoid()
+            nn.Linear(channels // reduction, channels, bias=False)
         )
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
         b, c, _, _ = x.size()
-        weights = self.fc(x).view(b, c, 1, 1)
-        return x * weights
+        avg_out = self.fc(self.avg_pool(x).view(b, c))
+        max_out = self.fc(self.max_pool(x).view(b, c))
+        scale = self.sigmoid(avg_out + max_out).view(b, c, 1, 1)
+        return x * scale
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size//2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        scale = self.sigmoid(self.conv(torch.cat([avg_out, max_out], dim=1)))
+        return x * scale
+
+class CBAM(nn.Module):
+    def __init__(self, channels):
+        super(CBAM, self).__init__()
+        self.ca = ChannelAttention(channels)
+        self.sa = SpatialAttention()
+
+    def forward(self, x):
+        return self.sa(self.ca(x))
 
 class DoubleConv(nn.Module):
-    """Double 3x3 Conv with BatchNorm, LeakyReLU, and SE Attention"""
     def __init__(self, in_channels, out_channels):
         super(DoubleConv, self).__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.LeakyReLU(0.1, inplace=True),
+            nn.GELU(),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.LeakyReLU(0.1, inplace=True)
+            nn.GELU()
         )
-        self.se = SqueezeExcitation(out_channels)
+        self.cbam = CBAM(out_channels)
         self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
 
     def forward(self, x):
-        return self.se(self.conv(x)) + self.shortcut(x)
+        return self.cbam(self.conv(x)) + self.shortcut(x)
+
+class ASPP(nn.Module):
+    """Atrous Spatial Pyramid Pooling for multi-scale synoptic atmospheric waves"""
+    def __init__(self, in_channels, out_channels):
+        super(ASPP, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 1, bias=False)
+        self.conv2 = nn.Conv2d(in_channels, out_channels, 3, padding=2, dilation=2, bias=False)
+        self.conv3 = nn.Conv2d(in_channels, out_channels, 3, padding=4, dilation=4, bias=False)
+        self.conv4 = nn.Conv2d(in_channels, out_channels, 3, padding=6, dilation=6, bias=False)
+        self.bn = nn.BatchNorm2d(out_channels * 4)
+        self.gelu = nn.GELU()
+        self.out_conv = nn.Conv2d(out_channels * 4, out_channels, 1, bias=False)
+
+    def forward(self, x):
+        x1 = self.conv1(x)
+        x2 = self.conv2(x)
+        x3 = self.conv3(x)
+        x4 = self.conv4(x)
+        cat = self.gelu(self.bn(torch.cat([x1, x2, x3, x4], dim=1)))
+        return self.out_conv(cat)
 
 class WeatherUNet(nn.Module):
     """
-    Residual Attention Weather U-Net (ResAttUNet)
-    Learns the fine-grained atmospheric residual correction field:
-    T_corrected = T_GFS + Delta_T
+    High-Capacity CBAM-ASPP Residual Weather U-Net
     """
     def __init__(self, in_channels=5, out_channels=1):
         super(WeatherUNet, self).__init__()
         
-        # Encoder
-        self.inc = DoubleConv(in_channels, 32)
-        self.down1 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(32, 64))
-        self.down2 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(64, 128))
-        self.down3 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(128, 256))
+        # Encoder (48 -> 96 -> 192 -> 384 channels)
+        self.inc = DoubleConv(in_channels, 48)
+        self.down1 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(48, 96))
+        self.down2 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(96, 192))
+        self.down3 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(192, 384))
         
-        # Bottleneck
-        self.bottleneck = DoubleConv(256, 256)
+        # ASPP Multi-Scale Bottleneck
+        self.aspp = ASPP(384, 384)
         
         # Decoder
-        self.up1 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.conv1 = DoubleConv(256, 128)
+        self.up1 = nn.ConvTranspose2d(384, 192, kernel_size=2, stride=2)
+        self.conv1 = DoubleConv(384, 192)
         
-        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.conv2 = DoubleConv(128, 64)
+        self.up2 = nn.ConvTranspose2d(192, 96, kernel_size=2, stride=2)
+        self.conv2 = DoubleConv(192, 96)
         
-        self.up3 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
-        self.conv3 = DoubleConv(64, 32)
+        self.up3 = nn.ConvTranspose2d(96, 48, kernel_size=2, stride=2)
+        self.conv3 = DoubleConv(96, 48)
         
-        # Output delta layer
+        # Output delta refinement
         self.outc = nn.Sequential(
-            nn.Conv2d(32, 16, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.1, inplace=True),
-            nn.Conv2d(16, out_channels, kernel_size=1)
+            nn.Conv2d(48, 24, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(24, out_channels, kernel_size=1)
         )
 
     def forward(self, x):
-        # Input channel 0 is GFS Temperature
         gfs_temp = x[:, 0:1, :, :]
         
         x1 = self.inc(x)
@@ -81,7 +119,7 @@ class WeatherUNet(nn.Module):
         x3 = self.down2(x2)
         x4 = self.down3(x3)
         
-        b = self.bottleneck(x4)
+        b = self.aspp(x4)
         
         d3 = self.up1(b)
         d3 = torch.cat([x3, d3], dim=1)
@@ -97,5 +135,4 @@ class WeatherUNet(nn.Module):
         
         delta_t = self.outc(d1)
         
-        # Residual Addition: Output = Input Temperature + Learned Residual Bias
         return gfs_temp + delta_t
