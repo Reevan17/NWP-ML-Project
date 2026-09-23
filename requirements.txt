@@ -1,0 +1,11 @@
+torch
+torchvision
+numpy
+xarray
+zarr
+gcsfs
+netCDF4
+scipy
+pandas
+matplotlib
+herbie-data

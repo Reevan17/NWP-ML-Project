@@ -1,0 +1,22 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+# Data Tensors (.npy arrays - too large for GitHub)
+data_processed/
+*.npy
+*.npz
+
+# PyTorch Model Checkpoints
+models/*.pth
+
+# macOS System Files
+.DS_Store
+
+# Herbie / GFS Cache
+data/
+*.grib2
+*.idx
