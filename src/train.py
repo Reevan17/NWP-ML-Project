@@ -19,8 +19,8 @@ except ImportError:
     from src.model import WeatherUNet
 
 BATCH_SIZE = 16
-LEARNING_RATE = 2.5e-3
-EPOCHS = 90
+LEARNING_RATE = 2.0e-3
+EPOCHS = 75
 
 if torch.backends.mps.is_available():
     DEVICE = torch.device("mps")
@@ -52,7 +52,7 @@ class CombinedWeatherLoss(nn.Module):
         self.grad_loss = SpatialGradientLoss()
 
     def forward(self, pred, target):
-        return self.mse(pred, target) + 1.0 * self.l1(pred, target) + 0.2 * self.grad_loss(pred, target)
+        return self.mse(pred, target) + 0.8 * self.l1(pred, target) + 0.15 * self.grad_loss(pred, target)
 
 def load_data():
     print(f"Loading datasets on {DEVICE}...")
@@ -61,42 +61,44 @@ def load_data():
     X_val   = np.load(os.path.join(DATA_DIR, "X_val.npy"))
     Y_val   = np.load(os.path.join(DATA_DIR, "Y_val.npy"))
 
+    # Direct Residual Bias Field (Y - GFS_temp)
+    delta_train = Y_train - X_train[:, 0:1, :, :]
+    delta_val   = Y_val   - X_val[:, 0:1, :, :]
+
     mean_X = np.mean(X_train, axis=(0, 2, 3), keepdims=True)
     std_X  = np.std(X_train, axis=(0, 2, 3), keepdims=True) + 1e-6
 
-    mean_Y = mean_X[:, 0:1, :, :]
-    std_Y  = std_X[:, 0:1, :, :]
+    # Normalization strictly over the residual delta
+    mean_delta = np.mean(delta_train)
+    std_delta  = np.std(delta_train) + 1e-6
 
-    np.savez(NORM_STATS_PATH, mean_X=mean_X, std_X=std_X, mean_Y=mean_Y, std_Y=std_Y)
+    np.savez(NORM_STATS_PATH, mean_X=mean_X, std_X=std_X, mean_delta=mean_delta, std_delta=std_delta)
 
     X_train_norm = (X_train - mean_X) / std_X
-    Y_train_norm = (Y_train - mean_Y) / std_Y
-    X_val_norm   = (X_val - mean_X) / std_X
-    Y_val_norm   = (Y_val - mean_Y) / std_Y
+    delta_train_norm = (delta_train - mean_delta) / std_delta
+
+    X_val_norm = (X_val - mean_X) / std_X
+    delta_val_norm = (delta_val - mean_delta) / std_delta
 
     train_loader = DataLoader(
         TensorDataset(torch.tensor(X_train_norm, dtype=torch.float32), 
-                      torch.tensor(Y_train_norm, dtype=torch.float32)),
+                      torch.tensor(delta_train_norm, dtype=torch.float32)),
         batch_size=BATCH_SIZE, shuffle=True
     )
     val_loader = DataLoader(
         TensorDataset(torch.tensor(X_val_norm, dtype=torch.float32), 
-                      torch.tensor(Y_val_norm, dtype=torch.float32)),
+                      torch.tensor(delta_val_norm, dtype=torch.float32)),
         batch_size=BATCH_SIZE, shuffle=False
     )
-    return train_loader, val_loader, mean_Y, std_Y
+    return train_loader, val_loader, mean_delta, std_delta
 
 def train():
-    train_loader, val_loader, mean_Y, std_Y = load_data()
+    train_loader, val_loader, mean_delta, std_delta = load_data()
     model = WeatherUNet(in_channels=5, out_channels=1).to(DEVICE)
     
     criterion = CombinedWeatherLoss().to(DEVICE)
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
-    
-    total_steps = EPOCHS * len(train_loader)
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=LEARNING_RATE, total_steps=total_steps, pct_start=0.15, anneal_strategy='cos'
-    )
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
 
     print(f"\n{'Epoch':^7} | {'Train Loss':^18} | {'Val Loss':^16} | {'Val RMSE (°C)':^15}")
     print("-" * 65)
@@ -114,7 +116,6 @@ def train():
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            scheduler.step()
             train_loss += loss.item() * inputs.size(0)
 
         train_loss /= len(train_loader.dataset)
@@ -132,8 +133,9 @@ def train():
 
         val_loss /= len(val_loader.dataset)
         val_mse  /= len(val_loader.dataset)
+        scheduler.step()
 
-        val_rmse_celsius = np.sqrt(val_mse) * float(np.mean(std_Y))
+        val_rmse_celsius = np.sqrt(val_mse) * float(std_delta)
 
         if epoch % 5 == 0 or epoch == 1 or val_loss < best_val_loss:
             print(f"{epoch:^7d} | {train_loss:^18.5f} | {val_loss:^16.5f} | {val_rmse_celsius:^15.2f} °C")
@@ -142,7 +144,7 @@ def train():
             best_val_loss = val_loss
             torch.save(model.state_dict(), MODEL_SAVE_PATH)
 
-    print(f"\n✅ High-Accuracy Training Finished! Best model saved to '{MODEL_SAVE_PATH}'.")
+    print(f"\n✅ High-Precision Training Finished! Best model saved to '{MODEL_SAVE_PATH}'.")
 
 if __name__ == "__main__":
     train()

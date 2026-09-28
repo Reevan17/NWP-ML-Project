@@ -27,7 +27,7 @@ else:
 def evaluate():
     stats = np.load(NORM_STATS_PATH)
     mean_X, std_X = stats['mean_X'], stats['std_X']
-    mean_Y, std_Y = stats['mean_Y'], stats['std_Y']
+    mean_delta, std_delta = float(stats['mean_delta']), float(stats['std_delta'])
 
     X_test = np.load(os.path.join(DATA_DIR, "X_test.npy"))
     Y_test = np.load(os.path.join(DATA_DIR, "Y_test.npy"))
@@ -39,12 +39,13 @@ def evaluate():
     model.eval()
 
     with torch.no_grad():
-        preds_norm = model(X_test_norm).cpu().numpy()
+        pred_delta_norm = model(X_test_norm).cpu().numpy()
 
-    # Denormalize to Kelvin
-    preds_kelvin = (preds_norm * std_Y) + mean_Y
-    gfs_kelvin   = X_test[:, 0:1, :, :]
-    era_kelvin   = Y_test
+    # Denormalize residual delta and add directly to GFS
+    pred_delta = (pred_delta_norm * std_delta) + mean_delta
+    gfs_kelvin = X_test[:, 0:1, :, :]
+    preds_kelvin = gfs_kelvin + pred_delta
+    era_kelvin = Y_test
 
     # Compute Statistical Metrics (RMSE in °C / K)
     gfs_rmse = np.sqrt(np.mean((gfs_kelvin - era_kelvin)**2))
@@ -59,7 +60,7 @@ def evaluate():
     print(f"• Accuracy Improvement:   {reduction:.1f} % Error Reduction!")
     print("="*55)
 
-    # Aerospace Aerodynamic Drag & Density Calculation (Averaged across all 129 test days)
+    # Aerospace Aerodynamic Drag & Density Calculation
     P = 50000.0       # Pascals (500 hPa)
     R_spec = 287.058  # J/(kg*K)
     
@@ -91,22 +92,18 @@ def evaluate():
     t_min = min(np.min(gfs_kelvin[0,0]-273.15), np.min(era_kelvin[0,0]-273.15))
     t_max = max(np.max(gfs_kelvin[0,0]-273.15), np.max(era_kelvin[0,0]-273.15))
 
-    # 1. GFS
     im1 = axes[0, 0].imshow(gfs_kelvin[0, 0] - 273.15, cmap='coolwarm', vmin=t_min, vmax=t_max)
     axes[0, 0].set_title('1. Raw GFS Input (500 hPa Temp °C)', fontsize=12, fontweight='bold')
     fig.colorbar(im1, ax=axes[0, 0], orientation='horizontal', pad=0.1)
 
-    # 2. ERA5 Ground Truth
     im2 = axes[0, 1].imshow(era_kelvin[0, 0] - 273.15, cmap='coolwarm', vmin=t_min, vmax=t_max)
     axes[0, 1].set_title('2. ERA5 Ground Truth Target (°C)', fontsize=12, fontweight='bold')
     fig.colorbar(im2, ax=axes[0, 1], orientation='horizontal', pad=0.1)
 
-    # 3. AI Corrected
     im3 = axes[1, 0].imshow(preds_kelvin[0, 0] - 273.15, cmap='coolwarm', vmin=t_min, vmax=t_max)
     axes[1, 0].set_title('3. AI Corrected Temperature Map (°C)', fontsize=12, fontweight='bold')
     fig.colorbar(im3, ax=axes[1, 0], orientation='horizontal', pad=0.1)
 
-    # 4. Improvement Map
     diff = np.abs(gfs_kelvin[0, 0] - era_kelvin[0, 0]) - np.abs(preds_kelvin[0, 0] - era_kelvin[0, 0])
     im4 = axes[1, 1].imshow(diff, cmap='RdYlGn', vmin=-1, vmax=2)
     axes[1, 1].set_title('4. Error Reduction Map (Green = Fixed by AI)', fontsize=12, fontweight='bold')

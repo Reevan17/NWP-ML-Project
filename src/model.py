@@ -59,7 +59,6 @@ class DoubleConv(nn.Module):
         return self.cbam(self.conv(x)) + self.shortcut(x)
 
 class ASPP(nn.Module):
-    """Atrous Spatial Pyramid Pooling for multi-scale synoptic atmospheric waves"""
     def __init__(self, in_channels, out_channels):
         super(ASPP, self).__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 1, bias=False)
@@ -80,18 +79,19 @@ class ASPP(nn.Module):
 
 class WeatherUNet(nn.Module):
     """
-    High-Capacity CBAM-ASPP Residual Weather U-Net
+    Direct Residual Delta Predictor
+    Outputs normalized residual correction delta: Delta_T
     """
     def __init__(self, in_channels=5, out_channels=1):
         super(WeatherUNet, self).__init__()
         
-        # Encoder (48 -> 96 -> 192 -> 384 channels)
+        # Encoder
         self.inc = DoubleConv(in_channels, 48)
         self.down1 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(48, 96))
         self.down2 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(96, 192))
         self.down3 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(192, 384))
         
-        # ASPP Multi-Scale Bottleneck
+        # ASPP Bottleneck
         self.aspp = ASPP(384, 384)
         
         # Decoder
@@ -104,7 +104,7 @@ class WeatherUNet(nn.Module):
         self.up3 = nn.ConvTranspose2d(96, 48, kernel_size=2, stride=2)
         self.conv3 = DoubleConv(96, 48)
         
-        # Output delta refinement
+        # Output delta layer
         self.outc = nn.Sequential(
             nn.Conv2d(48, 24, kernel_size=3, padding=1),
             nn.GELU(),
@@ -112,8 +112,6 @@ class WeatherUNet(nn.Module):
         )
 
     def forward(self, x):
-        gfs_temp = x[:, 0:1, :, :]
-        
         x1 = self.inc(x)
         x2 = self.down1(x1)
         x3 = self.down2(x2)
@@ -133,6 +131,5 @@ class WeatherUNet(nn.Module):
         d1 = torch.cat([x1, d1], dim=1)
         d1 = self.conv3(d1)
         
-        delta_t = self.outc(d1)
-        
-        return gfs_temp + delta_t
+        delta = self.outc(d1)
+        return delta
