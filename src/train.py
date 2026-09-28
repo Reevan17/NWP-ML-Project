@@ -19,8 +19,8 @@ except ImportError:
     from src.model import WeatherUNet
 
 BATCH_SIZE = 16
-LEARNING_RATE = 2.0e-3
-EPOCHS = 75
+LEARNING_RATE = 6.0e-4
+EPOCHS = 100
 
 if torch.backends.mps.is_available():
     DEVICE = torch.device("mps")
@@ -52,7 +52,7 @@ class CombinedWeatherLoss(nn.Module):
         self.grad_loss = SpatialGradientLoss()
 
     def forward(self, pred, target):
-        return self.mse(pred, target) + 0.8 * self.l1(pred, target) + 0.15 * self.grad_loss(pred, target)
+        return self.mse(pred, target) + 0.6 * self.l1(pred, target) + 0.1 * self.grad_loss(pred, target)
 
 def load_data():
     print(f"Loading datasets on {DEVICE}...")
@@ -61,14 +61,12 @@ def load_data():
     X_val   = np.load(os.path.join(DATA_DIR, "X_val.npy"))
     Y_val   = np.load(os.path.join(DATA_DIR, "Y_val.npy"))
 
-    # Direct Residual Bias Field (Y - GFS_temp)
     delta_train = Y_train - X_train[:, 0:1, :, :]
     delta_val   = Y_val   - X_val[:, 0:1, :, :]
 
     mean_X = np.mean(X_train, axis=(0, 2, 3), keepdims=True)
     std_X  = np.std(X_train, axis=(0, 2, 3), keepdims=True) + 1e-6
 
-    # Normalization strictly over the residual delta
     mean_delta = np.mean(delta_train)
     std_delta  = np.std(delta_train) + 1e-6
 
@@ -98,7 +96,7 @@ def train():
     
     criterion = CombinedWeatherLoss().to(DEVICE)
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-7)
 
     print(f"\n{'Epoch':^7} | {'Train Loss':^18} | {'Val Loss':^16} | {'Val RMSE (°C)':^15}")
     print("-" * 65)
@@ -114,7 +112,7 @@ def train():
             outputs = model(inputs)
             loss = criterion(outputs, targets)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             optimizer.step()
             train_loss += loss.item() * inputs.size(0)
 
