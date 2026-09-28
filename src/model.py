@@ -79,10 +79,9 @@ class ASPP(nn.Module):
 
 class WeatherUNet(nn.Module):
     """
-    Direct Residual Delta Predictor
-    Outputs normalized residual correction delta: Delta_T
+    CoordConv-Augmented CBAM-ASPP Residual Weather U-Net (in_channels=7: 5 weather + 2 spatial coords)
     """
-    def __init__(self, in_channels=5, out_channels=1):
+    def __init__(self, in_channels=7, out_channels=1):
         super(WeatherUNet, self).__init__()
         
         # Encoder
@@ -112,6 +111,13 @@ class WeatherUNet(nn.Module):
         )
 
     def forward(self, x):
+        # Auto-append normalized coordinate grids if 5 channels passed
+        if x.size(1) == 5:
+            b, _, h, w = x.size()
+            y_coords = torch.linspace(-1, 1, h, device=x.device).view(1, 1, h, 1).expand(b, 1, h, w)
+            x_coords = torch.linspace(-1, 1, w, device=x.device).view(1, 1, 1, w).expand(b, 1, h, w)
+            x = torch.cat([x, y_coords, x_coords], dim=1)
+
         x1 = self.inc(x)
         x2 = self.down1(x1)
         x3 = self.down2(x2)

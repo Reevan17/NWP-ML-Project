@@ -34,7 +34,8 @@ def evaluate():
 
     X_test_norm = torch.tensor((X_test - mean_X) / std_X, dtype=torch.float32).to(DEVICE)
 
-    model = WeatherUNet(in_channels=5, out_channels=1).to(DEVICE)
+    # Initialize model with 7 channels for CoordConv
+    model = WeatherUNet(in_channels=7, out_channels=1).to(DEVICE)
     model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
     model.eval()
 

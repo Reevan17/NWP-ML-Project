@@ -19,8 +19,8 @@ except ImportError:
     from src.model import WeatherUNet
 
 BATCH_SIZE = 16
-LEARNING_RATE = 6.0e-4
-EPOCHS = 100
+LEARNING_RATE = 1.0e-3
+EPOCHS = 85
 
 if torch.backends.mps.is_available():
     DEVICE = torch.device("mps")
@@ -52,7 +52,7 @@ class CombinedWeatherLoss(nn.Module):
         self.grad_loss = SpatialGradientLoss()
 
     def forward(self, pred, target):
-        return self.mse(pred, target) + 0.6 * self.l1(pred, target) + 0.1 * self.grad_loss(pred, target)
+        return self.mse(pred, target) + 0.8 * self.l1(pred, target) + 0.1 * self.grad_loss(pred, target)
 
 def load_data():
     print(f"Loading datasets on {DEVICE}...")
@@ -92,11 +92,11 @@ def load_data():
 
 def train():
     train_loader, val_loader, mean_delta, std_delta = load_data()
-    model = WeatherUNet(in_channels=5, out_channels=1).to(DEVICE)
+    model = WeatherUNet(in_channels=7, out_channels=1).to(DEVICE)
     
     criterion = CombinedWeatherLoss().to(DEVICE)
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-7)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
 
     print(f"\n{'Epoch':^7} | {'Train Loss':^18} | {'Val Loss':^16} | {'Val RMSE (°C)':^15}")
     print("-" * 65)
@@ -142,7 +142,7 @@ def train():
             best_val_loss = val_loss
             torch.save(model.state_dict(), MODEL_SAVE_PATH)
 
-    print(f"\n✅ High-Precision Training Finished! Best model saved to '{MODEL_SAVE_PATH}'.")
+    print(f"\n✅ CoordConv Training Finished! Best model saved to '{MODEL_SAVE_PATH}'.")
 
 if __name__ == "__main__":
     train()
