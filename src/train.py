@@ -20,7 +20,7 @@ except ImportError:
 
 BATCH_SIZE = 16
 LEARNING_RATE = 1.0e-3
-EPOCHS = 85
+EPOCHS = 40
 
 if torch.backends.mps.is_available():
     DEVICE = torch.device("mps")
@@ -28,6 +28,19 @@ elif torch.cuda.is_available():
     DEVICE = torch.device("cuda")
 else:
     DEVICE = torch.device("cpu")
+
+def add_physics_channels(X):
+    # N, C, H, W -> N, 8, H, W
+    N, C, H, W = X.shape
+    y_coords = np.linspace(-1, 1, H, dtype=np.float32).reshape(1, 1, H, 1)
+    y_coords = np.tile(y_coords, (N, 1, 1, W))
+    
+    x_coords = np.linspace(-1, 1, W, dtype=np.float32).reshape(1, 1, 1, W)
+    x_coords = np.tile(x_coords, (N, 1, H, 1))
+    
+    gh = X[:, 4:5, :, :]
+    gh_anomaly = gh - np.mean(gh, axis=(2, 3), keepdims=True)
+    return np.concatenate([X, y_coords, x_coords, gh_anomaly], axis=1)
 
 class SpatialGradientLoss(nn.Module):
     def __init__(self):
@@ -55,7 +68,7 @@ class CombinedWeatherLoss(nn.Module):
         return self.mse(pred, target) + 0.8 * self.l1(pred, target) + 0.1 * self.grad_loss(pred, target)
 
 def load_data():
-    print(f"Loading datasets on {DEVICE}...")
+    print(f"Loading and pre-calculating physics channels on {DEVICE}...")
     X_train = np.load(os.path.join(DATA_DIR, "X_train.npy"))
     Y_train = np.load(os.path.join(DATA_DIR, "Y_train.npy"))
     X_val   = np.load(os.path.join(DATA_DIR, "X_val.npy"))
@@ -64,18 +77,22 @@ def load_data():
     delta_train = Y_train - X_train[:, 0:1, :, :]
     delta_val   = Y_val   - X_val[:, 0:1, :, :]
 
-    mean_X = np.mean(X_train, axis=(0, 2, 3), keepdims=True)
-    std_X  = np.std(X_train, axis=(0, 2, 3), keepdims=True) + 1e-6
+    # 8-channel precomputed arrays
+    X_train_8 = add_physics_channels(X_train)
+    X_val_8   = add_physics_channels(X_val)
+
+    mean_X = np.mean(X_train_8, axis=(0, 2, 3), keepdims=True)
+    std_X  = np.std(X_train_8, axis=(0, 2, 3), keepdims=True) + 1e-6
 
     mean_delta = np.mean(delta_train)
     std_delta  = np.std(delta_train) + 1e-6
 
     np.savez(NORM_STATS_PATH, mean_X=mean_X, std_X=std_X, mean_delta=mean_delta, std_delta=std_delta)
 
-    X_train_norm = (X_train - mean_X) / std_X
+    X_train_norm = (X_train_8 - mean_X) / std_X
     delta_train_norm = (delta_train - mean_delta) / std_delta
 
-    X_val_norm = (X_val - mean_X) / std_X
+    X_val_norm = (X_val_8 - mean_X) / std_X
     delta_val_norm = (delta_val - mean_delta) / std_delta
 
     train_loader = DataLoader(
@@ -92,7 +109,7 @@ def load_data():
 
 def train():
     train_loader, val_loader, mean_delta, std_delta = load_data()
-    model = WeatherUNet(in_channels=7, out_channels=1).to(DEVICE)
+    model = WeatherUNet(in_channels=8, out_channels=1).to(DEVICE)
     
     criterion = CombinedWeatherLoss().to(DEVICE)
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
@@ -142,7 +159,7 @@ def train():
             best_val_loss = val_loss
             torch.save(model.state_dict(), MODEL_SAVE_PATH)
 
-    print(f"\n✅ CoordConv Training Finished! Best model saved to '{MODEL_SAVE_PATH}'.")
+    print(f"\n✅ Stage 7 Training Finished! Best model saved to '{MODEL_SAVE_PATH}'.")
 
 if __name__ == "__main__":
     train()

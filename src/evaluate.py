@@ -24,6 +24,18 @@ elif torch.cuda.is_available():
 else:
     DEVICE = torch.device("cpu")
 
+def add_physics_channels(X):
+    N, C, H, W = X.shape
+    y_coords = np.linspace(-1, 1, H, dtype=np.float32).reshape(1, 1, H, 1)
+    y_coords = np.tile(y_coords, (N, 1, 1, W))
+    
+    x_coords = np.linspace(-1, 1, W, dtype=np.float32).reshape(1, 1, 1, W)
+    x_coords = np.tile(x_coords, (N, 1, H, 1))
+    
+    gh = X[:, 4:5, :, :]
+    gh_anomaly = gh - np.mean(gh, axis=(2, 3), keepdims=True)
+    return np.concatenate([X, y_coords, x_coords, gh_anomaly], axis=1)
+
 def evaluate():
     stats = np.load(NORM_STATS_PATH)
     mean_X, std_X = stats['mean_X'], stats['std_X']
@@ -32,10 +44,10 @@ def evaluate():
     X_test = np.load(os.path.join(DATA_DIR, "X_test.npy"))
     Y_test = np.load(os.path.join(DATA_DIR, "Y_test.npy"))
 
-    X_test_norm = torch.tensor((X_test - mean_X) / std_X, dtype=torch.float32).to(DEVICE)
+    X_test_8 = add_physics_channels(X_test)
+    X_test_norm = torch.tensor((X_test_8 - mean_X) / std_X, dtype=torch.float32).to(DEVICE)
 
-    # Initialize model with 7 channels for CoordConv
-    model = WeatherUNet(in_channels=7, out_channels=1).to(DEVICE)
+    model = WeatherUNet(in_channels=8, out_channels=1).to(DEVICE)
     model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
     model.eval()
 
@@ -54,66 +66,73 @@ def evaluate():
     reduction = ((gfs_rmse - ai_rmse) / gfs_rmse) * 100
 
     print("="*55)
-    print("🏆 FINAL EVALUATION RESULTS (TEST SET: 129 SAMPLES)")
+    print(f"🏆 FINAL EVALUATION RESULTS (TEST SET: {len(X_test)} SAMPLES)")
     print("="*55)
     print(f"• Baseline Raw GFS Error: {gfs_rmse:.2f} °C")
     print(f"• AI Corrected Error:     {ai_rmse:.2f} °C")
     print(f"• Accuracy Improvement:   {reduction:.1f} % Error Reduction!")
     print("="*55)
 
-    # Aerospace Aerodynamic Drag & Density Calculation
-    P = 50000.0       # Pascals (500 hPa)
-    R_spec = 287.058  # J/(kg*K)
-    
-    rho_gfs = P / (R_spec * gfs_kelvin)
-    rho_era = P / (R_spec * era_kelvin)
-    rho_ai  = P / (R_spec * preds_kelvin)
+    # Aerodynamic Drag Impact Calculation
+    p = 50000.0       # 500 hPa = 50,000 Pa
+    R_d = 287.05      # J/(kg*K)
+    v = 1000.0        # ~ Mach 3 supersonic booster re-entry (1000 m/s)
+    Cd = 0.82         # Booster drag coefficient
+    A = 10.5          # Cross-sectional area (m^2, Falcon 9 scale)
 
-    v = 500.0  # m/s (~Mach 1.6 supersonic reentry speed)
-    Cd = 0.8   # Drag coefficient of booster during entry burn / glide
-    A = 10.5   # Reference cross-sectional area (m^2) (~Falcon 9 diameter 3.66m)
-    
-    drag_gfs = 0.5 * rho_gfs * (v**2) * Cd * A / 1000.0  # in kN
+    rho_era = p / (R_d * era_kelvin)
+    rho_gfs = p / (R_d * gfs_kelvin)
+    rho_ai  = p / (R_d * preds_kelvin)
+
     drag_era = 0.5 * rho_era * (v**2) * Cd * A / 1000.0  # in kN
-    drag_ai  = 0.5 * rho_ai  * (v**2) * Cd * A / 1000.0  # in kN
+    drag_gfs = 0.5 * rho_gfs * (v**2) * Cd * A / 1000.0
+    drag_ai  = 0.5 * rho_ai  * (v**2) * Cd * A / 1000.0
 
-    gfs_drag_err = np.mean(np.abs(drag_gfs - drag_era))
-    ai_drag_err  = np.mean(np.abs(drag_ai - drag_era))
-    drag_reduction = ((gfs_drag_err - ai_drag_err) / gfs_drag_err) * 100.0
+    drag_error_gfs = np.mean(np.abs(drag_gfs - drag_era))
+    drag_error_ai  = np.mean(np.abs(drag_ai - drag_era))
+    drag_reduction = ((drag_error_gfs - drag_error_ai) / drag_error_gfs) * 100
 
     print(f"🚀 Booster Drag Error at 500 hPa (Full Test Set Mean):")
-    print(f"   • Raw GFS Drag Discrepancy: {gfs_drag_err:.2f} kN")
-    print(f"   • AI Corrected Discrepancy: {ai_drag_err:.2f} kN")
+    print(f"   • Raw GFS Drag Discrepancy: {drag_error_gfs:.2f} kN")
+    print(f"   • AI Corrected Discrepancy: {drag_error_ai:.2f} kN")
     print(f"   • Drag Accuracy Boost:      {drag_reduction:.1f} % Error Reduction!")
     print("="*55)
 
-    # Master Plot
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    # Plot 4-Panel Verification Figure
+    idx = 0
+    vmin = min(era_kelvin[idx, 0].min(), gfs_kelvin[idx, 0].min(), preds_kelvin[idx, 0].min()) - 273.15
+    vmax = max(era_kelvin[idx, 0].max(), gfs_kelvin[idx, 0].max(), preds_kelvin[idx, 0].max()) - 273.15
 
-    t_min = min(np.min(gfs_kelvin[0,0]-273.15), np.min(era_kelvin[0,0]-273.15))
-    t_max = max(np.max(gfs_kelvin[0,0]-273.15), np.max(era_kelvin[0,0]-273.15))
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    im1 = axes[0, 0].imshow(gfs_kelvin[0, 0] - 273.15, cmap='coolwarm', vmin=t_min, vmax=t_max)
-    axes[0, 0].set_title('1. Raw GFS Input (500 hPa Temp °C)', fontsize=12, fontweight='bold')
-    fig.colorbar(im1, ax=axes[0, 0], orientation='horizontal', pad=0.1)
+    im0 = axes[0, 0].imshow(gfs_kelvin[idx, 0] - 273.15, cmap='jet', vmin=vmin, vmax=vmax)
+    axes[0, 0].set_title(f"(A) Raw GFS Forecast ($T_{{500hPa}}$)\nRMSE: {np.sqrt(np.mean((gfs_kelvin[idx]-era_kelvin[idx])**2)):.2f} °C", fontsize=12, fontweight='bold')
+    plt.colorbar(im0, ax=axes[0, 0], label="°C")
 
-    im2 = axes[0, 1].imshow(era_kelvin[0, 0] - 273.15, cmap='coolwarm', vmin=t_min, vmax=t_max)
-    axes[0, 1].set_title('2. ERA5 Ground Truth Target (°C)', fontsize=12, fontweight='bold')
-    fig.colorbar(im2, ax=axes[0, 1], orientation='horizontal', pad=0.1)
+    im1 = axes[0, 1].imshow(era_kelvin[idx, 0] - 273.15, cmap='jet', vmin=vmin, vmax=vmax)
+    axes[0, 1].set_title("(B) Ground Truth (ECMWF ERA5)\nReference Field", fontsize=12, fontweight='bold')
+    plt.colorbar(im1, ax=axes[0, 1], label="°C")
 
-    im3 = axes[1, 0].imshow(preds_kelvin[0, 0] - 273.15, cmap='coolwarm', vmin=t_min, vmax=t_max)
-    axes[1, 0].set_title('3. AI Corrected Temperature Map (°C)', fontsize=12, fontweight='bold')
-    fig.colorbar(im3, ax=axes[1, 0], orientation='horizontal', pad=0.1)
+    im2 = axes[1, 0].imshow(preds_kelvin[idx, 0] - 273.15, cmap='jet', vmin=vmin, vmax=vmax)
+    axes[1, 0].set_title(f"(C) Stage 7 Physics-CoordConv AI Corrected\nRMSE: {np.sqrt(np.mean((preds_kelvin[idx]-era_kelvin[idx])**2)):.2f} °C", fontsize=12, fontweight='bold')
+    plt.colorbar(im2, ax=axes[1, 0], label="°C")
 
-    diff = np.abs(gfs_kelvin[0, 0] - era_kelvin[0, 0]) - np.abs(preds_kelvin[0, 0] - era_kelvin[0, 0])
-    im4 = axes[1, 1].imshow(diff, cmap='RdYlGn', vmin=-1, vmax=2)
-    axes[1, 1].set_title('4. Error Reduction Map (Green = Fixed by AI)', fontsize=12, fontweight='bold')
-    fig.colorbar(im4, ax=axes[1, 1], orientation='horizontal', pad=0.1, label='°C Error Eliminated')
+    error_diff = np.abs(preds_kelvin[idx, 0] - era_kelvin[idx, 0])
+    im3 = axes[1, 1].imshow(error_diff, cmap='inferno', vmin=0, vmax=2.5)
+    axes[1, 1].set_title("(D) Remaining Absolute Error ($|T_{{AI}} - T_{{ERA5}}|$\nResidual Discrepancy", fontsize=12, fontweight='bold')
+    plt.colorbar(im3, ax=axes[1, 1], label="|ΔT| °C")
 
+    for ax in axes.flat:
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    plt.suptitle("Stage 7: AI-Driven Atmospheric Bias Correction at 500 hPa\n(South Asia Domain: 5°N–40°N, 65°E–100°E)", fontsize=15, fontweight='bold')
     plt.tight_layout()
-    output_plot = os.path.join(OUTPUT_DIR, "rocket_trajectory_weather_correction.png")
-    plt.savefig(output_plot, dpi=300)
-    print(f"✅ Master Plot saved to '{output_plot}'")
+
+    plot_path = os.path.join(OUTPUT_DIR, "rocket_trajectory_weather_correction.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"✅ Master Plot saved to '{plot_path}'")
 
 if __name__ == "__main__":
     evaluate()
