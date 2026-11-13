@@ -113,7 +113,7 @@ def main():
     X_test_norm = torch.tensor((X_test_8 - mean_X) / std_X, dtype=torch.float32).to(DEVICE)
 
     model = WeatherUNet(in_channels=8, out_channels=1).to(DEVICE)
-    model.load_state_dict(torch.load(os.path.join(MODELS_DIR, "best_unet_model.pth"), map_location=DEVICE))
+    model.load_state_dict(torch.load(os.path.join(MODELS_DIR, "best_unet_model.pth"), map_location=DEVICE, weights_only=True))
     model.eval()
 
     with torch.no_grad():
