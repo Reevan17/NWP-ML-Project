@@ -70,12 +70,13 @@ def simulate_reentry_trajectory(t_500_ref, name="Baseline"):
         if z < 2500.0 and v > 40.0:
             thrust = 320000.0  # Merlin 1D landing burn
 
-        dv_dt = g * np.sin(gamma) - (drag_force - thrust) / m
+        dv_dt = g * np.sin(gamma) - (drag_force + thrust) / m
         dz_dt = - v * np.sin(gamma)
         dx_dt = v * np.cos(gamma)
 
         z += dz_dt * dt
-        v -= dv_dt * dt
+        v += dv_dt * dt
+        v = max(0.0, v)
         x += dx_dt * dt
         t += dt
 

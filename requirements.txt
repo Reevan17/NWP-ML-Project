@@ -9,3 +9,5 @@ scipy
 pandas
 matplotlib
 herbie-data
+streamlit
+plotly
